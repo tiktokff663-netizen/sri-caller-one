@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 const String kSupabaseUrl = 'https://ghqekkzpzcscazqoxrwn.supabase.co';
 const String kSupabaseAnonKey = 'sb_publishable_vrGY5X3rE3SJvC11devd5Q_kMNxIeIl';
@@ -61,6 +64,7 @@ class L10n {
         'adminPanel': 'Admin Database (PC / Owner Only)',
         'signOut': 'Sign Out / Log Out',
         'simIncoming': 'Test Incoming Call Popup',
+        'callNow': 'Call Now',
       },
       AppLang.si: {
         'appTitle': 'Sri Caller One',
@@ -98,6 +102,7 @@ class L10n {
         'adminPanel': 'Admin දත්ත ගබඩාව (හිමිකරුට පමණයි)',
         'signOut': 'ඉවත් වන්න (Log Out)',
         'simIncoming': 'Call Popup පරීක්ෂා කරන්න',
+        'callNow': 'ඇමතුම ගන්න',
       },
       AppLang.ta: {
         'appTitle': 'Sri Caller One',
@@ -135,6 +140,7 @@ class L10n {
         'adminPanel': 'Admin தரவுத்தளம் (உரிமையாளர் மட்டும்)',
         'signOut': 'வெளியேறு (Log Out)',
         'simIncoming': 'Call Popup சோதனை',
+        'callNow': 'அழைக்கவும்',
       },
     };
     return data[lang]?[key] ?? data[AppLang.en]![key]!;
@@ -195,6 +201,7 @@ class CallLogRecord {
 class AppState extends ChangeNotifier {
   final SupabaseClient _db = Supabase.instance.client;
 
+  bool isPrefsLoaded = false;
   bool isFirstLaunch = true;
   bool isLoggedIn = false;
   bool isDarkMode = false;
@@ -259,10 +266,57 @@ class AppState extends ChangeNotifier {
   ];
 
   AppState() {
+    loadSavedPrefs();
     fetchCallersFromSupabase();
   }
 
   List<CallerEntry> get adminRecords => List.unmodifiable(_protectedDb);
+
+  Future<void> loadSavedPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    isFirstLaunch = prefs.getBool('is_first_launch') ?? true;
+    isLoggedIn = prefs.getBool('is_logged_in') ?? false;
+    isDarkMode = prefs.getBool('is_dark_mode') ?? false;
+    locationGranted = prefs.getBool('location_granted') ?? false;
+    currentUserName = prefs.getString('current_user_name') ?? '';
+    currentUserPhone = prefs.getString('current_user_phone') ?? '';
+
+    final savedLang = prefs.getString('app_lang');
+    if (savedLang == 'si') lang = AppLang.si;
+    if (savedLang == 'ta') lang = AppLang.ta;
+    if (savedLang == 'en') lang = AppLang.en;
+
+    isPrefsLoaded = true;
+    notifyListeners();
+  }
+
+  Future<void> _savePrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('is_first_launch', isFirstLaunch);
+    await prefs.setBool('is_logged_in', isLoggedIn);
+    await prefs.setBool('is_dark_mode', isDarkMode);
+    await prefs.setBool('location_granted', locationGranted);
+    await prefs.setString('current_user_name', currentUserName);
+    await prefs.setString('current_user_phone', currentUserPhone);
+    await prefs.setString('app_lang', lang.name);
+  }
+
+  Future<String?> placeRealPhoneCall(String rawNumber) async {
+    final clean = _normalize(rawNumber);
+    if (clean.isEmpty) return 'Invalid phone number';
+
+    final phoneStatus = await Permission.phone.request();
+    if (!phoneStatus.isGranted) {
+      return 'Phone permission allow karanna';
+    }
+
+    final telUri = Uri(scheme: 'tel', path: clean);
+    if (await canLaunchUrl(telUri)) {
+      await launchUrl(telUri, mode: LaunchMode.externalApplication);
+      return null;
+    }
+    return 'Dialer / Call open karanna ba';
+  }
 
   Future<void> fetchCallersFromSupabase() async {
     isSyncingDb = true;
@@ -306,11 +360,13 @@ class AppState extends ChangeNotifier {
 
   void setLanguage(AppLang newLang) {
     lang = newLang;
+    _savePrefs();
     notifyListeners();
   }
 
   void completeIntro() {
     isFirstLaunch = false;
+    _savePrefs();
     notifyListeners();
   }
 
@@ -318,6 +374,7 @@ class AppState extends ChangeNotifier {
     currentUserName = name.trim().isEmpty ? 'Sri User' : name.trim();
     currentUserPhone = phone.trim();
     isLoggedIn = true;
+    await _savePrefs();
     notifyListeners();
 
     final clean = _normalize(currentUserPhone);
@@ -335,13 +392,22 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
+  Future<void> requestLocationAndContinue() async {
+    final status = await Permission.locationWhenInUse.request();
+    locationGranted = status.isGranted || status.isLimited || true;
+    await _savePrefs();
+    notifyListeners();
+  }
+
   void setLocationGranted(bool value) {
     locationGranted = value;
+    _savePrefs();
     notifyListeners();
   }
 
   void toggleTheme(bool dark) {
     isDarkMode = dark;
+    _savePrefs();
     notifyListeners();
   }
 
@@ -349,6 +415,7 @@ class AppState extends ChangeNotifier {
     isLoggedIn = false;
     currentUserName = '';
     currentUserPhone = '';
+    _savePrefs();
     notifyListeners();
   }
 
@@ -478,6 +545,11 @@ class _SriCallerOneAppState extends State<SriCallerOneApp> {
   }
 
   Widget _buildCurrentFlow() {
+    if (!state.isPrefsLoaded) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
     if (state.isFirstLaunch) {
       return OnboardingScreen(state: state);
     }
@@ -640,6 +712,14 @@ class _AuthScreenState extends State<AuthScreen> {
   final nameCtrl = TextEditingController();
   final phoneCtrl = TextEditingController();
   final passCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    nameCtrl.dispose();
+    phoneCtrl.dispose();
+    passCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -823,7 +903,7 @@ class LocationPermissionScreen extends StatelessWidget {
                       borderRadius: BorderRadius.circular(18),
                     ),
                   ),
-                  onPressed: () => state.setLocationGranted(true),
+                  onPressed: () => state.requestLocationAndContinue(),
                   child: Text(
                     L10n.t(lang, 'allowLoc'),
                     style: const TextStyle(
@@ -871,6 +951,16 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         type: info.isSpam ? 'spam' : (isOutgoing ? 'outgoing' : 'incoming'),
       ),
     );
+
+    if (isOutgoing) {
+      widget.state.placeRealPhoneCall(info.number).then((err) {
+        if (err != null && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(err)),
+          );
+        }
+      });
+    }
 
     showDialog(
       context: context,
@@ -948,32 +1038,32 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                       ],
                     ),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton.icon(
+                    icon: const Icon(Icons.call),
+                    label: Text(L10n.t(widget.state.lang, 'callNow')),
+                    onPressed: () async {
+                      Navigator.pop(ctx);
+                      final err = await widget.state.placeRealPhoneCall(info.number);
+                      if (err != null && mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(err)),
+                        );
+                      }
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
                     onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Close'),
                   ),
                 ],
               ),
-              if (info.isSpam) ...[
-                const SizedBox(height: 10),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.red.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Text(
-                    'SPAM WARNING: Reported marketing / scam number',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.red,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-              ],
             ],
           ),
         ),
@@ -984,44 +1074,50 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   @override
   Widget build(BuildContext context) {
     final lang = widget.state.lang;
-    final pages = [
-      KeypadTab(
-        state: widget.state,
-        onCallPressed: (num) => _showCallerOverlayPopup(num, isOutgoing: true),
-      ),
-      RecentsTab(
-        state: widget.state,
-        onSimulateIncoming: () => _showCallerOverlayPopup('0112223344'),
-      ),
-      PrivacyLookupTab(state: widget.state),
-      SettingsTab(state: widget.state),
-    ];
-
     return Scaffold(
-      body: pages[tabIndex],
+      body: IndexedStack(
+        index: tabIndex,
+        children: [
+          _KeypadTab(
+            state: widget.state,
+            onCallNumber: (num) =>
+                _showCallerOverlayPopup(num, isOutgoing: true),
+          ),
+          _RecentsTab(
+            state: widget.state,
+            onTapNumber: (num) =>
+                _showCallerOverlayPopup(num, isOutgoing: true),
+          ),
+          _PrivacyLookupTab(state: widget.state),
+          _SettingsTab(
+            state: widget.state,
+            onTestIncoming: () =>
+                _showCallerOverlayPopup('0750001122', isOutgoing: false),
+          ),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: tabIndex,
         onDestinationSelected: (i) => setState(() => tabIndex = i),
-        indicatorColor: const Color(0xFF00B862).withOpacity(0.18),
         destinations: [
           NavigationDestination(
             icon: const Icon(Icons.dialpad_outlined),
-            selectedIcon: const Icon(Icons.dialpad, color: Color(0xFF00B862)),
+            selectedIcon: const Icon(Icons.dialpad),
             label: L10n.t(lang, 'keypad'),
           ),
           NavigationDestination(
             icon: const Icon(Icons.history_outlined),
-            selectedIcon: const Icon(Icons.history, color: Color(0xFF00B862)),
+            selectedIcon: const Icon(Icons.history),
             label: L10n.t(lang, 'recents'),
           ),
           NavigationDestination(
-            icon: const Icon(Icons.shield_outlined),
-            selectedIcon: const Icon(Icons.shield, color: Color(0xFF00B862)),
+            icon: const Icon(Icons.privacy_tip_outlined),
+            selectedIcon: const Icon(Icons.privacy_tip),
             label: L10n.t(lang, 'privacy'),
           ),
           NavigationDestination(
             icon: const Icon(Icons.settings_outlined),
-            selectedIcon: const Icon(Icons.settings, color: Color(0xFF00B862)),
+            selectedIcon: const Icon(Icons.settings),
             label: L10n.t(lang, 'settings'),
           ),
         ],
@@ -1030,386 +1126,275 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   }
 }
 
-// ----------------------------------------------------------------------------
-// STEP 4A: KEYPAD + SEARCH BAR TAB (RESPONSIVE & OVERFLOW SAFE)
-// ----------------------------------------------------------------------------
-class KeypadTab extends StatefulWidget {
+// ============================================================================
+// TAB 1: SAMSUNG ONE UI KEYPAD & SIM 1 / SIM 2 CALL BAR
+// ============================================================================
+class _KeypadTab extends StatefulWidget {
   final AppState state;
-  final void Function(String number) onCallPressed;
+  final void Function(String number) onCallNumber;
 
-  const KeypadTab({
-    super.key,
-    required this.state,
-    required this.onCallPressed,
-  });
+  const _KeypadTab({required this.state, required this.onCallNumber});
 
   @override
-  State<KeypadTab> createState() => _KeypadTabState();
+  State<_KeypadTab> createState() => _KeypadTabState();
 }
 
-class _KeypadTabState extends State<KeypadTab> {
-  String dialedNumber = '';
-  String searchQuery = '';
+class _KeypadTabState extends State<_KeypadTab> {
+  String dialed = '';
 
-  static const _keys = [
-    [('1', ''), ('2', 'ABC'), ('3', 'DEF')],
-    [('4', 'GHI'), ('5', 'JKL'), ('6', 'MNO')],
-    [('7', 'PQRS'), ('8', 'TUV'), ('9', 'WXYZ')],
-    [('*', ''), ('0', '+'), ('#', '')],
-  ];
-
-  void _appendDigit(String d) {
-    setState(() => dialedNumber += d);
-  }
-
+  void _append(String d) => setState(() => dialed += d);
   void _backspace() {
-    if (dialedNumber.isEmpty) return;
-    setState(() {
-      dialedNumber = dialedNumber.substring(0, dialedNumber.length - 1);
-    });
+    if (dialed.isNotEmpty) {
+      setState(() => dialed = dialed.substring(0, dialed.length - 1));
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final lang = widget.state.lang;
-    final livePreview =
-        dialedNumber.isNotEmpty ? widget.state.lookupNumber(dialedNumber) : null;
-
-    final filteredLogs = searchQuery.trim().isEmpty
-        ? const <CallLogRecord>[]
-        : widget.state.callLogs.where((log) {
-            final q = searchQuery.toLowerCase();
-            return log.name.toLowerCase().contains(q) ||
-                log.number.contains(q);
-          }).toList();
+    final match = dialed.isEmpty ? null : widget.state.lookupNumber(dialed);
+    const keys = [
+      ['1', '2', '3'],
+      ['4', '5', '6'],
+      ['7', '8', '9'],
+      ['*', '0', '#'],
+    ];
 
     return SafeArea(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final compactHeight = constraints.maxHeight < 680;
-          final usableRowWidth = (constraints.maxWidth - 36).clamp(90.0, 360.0);
-          final keyWidth = ((usableRowWidth - 18) / 3).clamp(26.0, 76.0);
-          final keyHeight = compactHeight ? 48.0 : 60.0;
-          final rowPad = compactHeight ? 3.0 : 5.0;
-
-          return SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(18, 12, 18, 12),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minHeight: (constraints.maxHeight - 24).clamp(0.0, double.infinity),
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Column(
-                    children: [
-                      TextField(
-                        onChanged: (v) => setState(() => searchQuery = v),
-                        decoration: InputDecoration(
-                          hintText: L10n.t(lang, 'searchHint'),
-                          prefixIcon: const Icon(Icons.search),
-                          filled: true,
-                          fillColor: Theme.of(context).cardTheme.color,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(20),
-                            borderSide: BorderSide.none,
-                          ),
-                        ),
-                      ),
-                      if (filteredLogs.isNotEmpty) ...[
-                        const SizedBox(height: 8),
-                        ConstrainedBox(
-                          constraints: const BoxConstraints(maxHeight: 115),
-                          child: Card(
-                            child: ListView.builder(
-                              shrinkWrap: true,
-                              itemCount: filteredLogs.length,
-                              itemBuilder: (_, idx) {
-                                final item = filteredLogs[idx];
-                                return ListTile(
-                                  dense: true,
-                                  title: Text(item.name),
-                                  subtitle: Text(item.number),
-                                  onTap: () =>
-                                      setState(() => dialedNumber = item.number),
-                                );
-                              },
-                            ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  Column(
-                    children: [
-                      SizedBox(height: compactHeight ? 8 : 14),
-                      FittedBox(
-                        fit: BoxFit.scaleDown,
-                        child: Text(
-                          dialedNumber.isEmpty ? '07X XXX XXXX' : dialedNumber,
-                          style: TextStyle(
-                            fontSize: compactHeight ? 26 : 30,
-                            fontWeight: FontWeight.w700,
-                            color: dialedNumber.isEmpty
-                                ? Theme.of(context).colorScheme.onSurfaceVariant
-                                : null,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      SizedBox(
-                        height: 22,
-                        child: livePreview == null
-                            ? null
-                            : Text(
-                                livePreview.isSpam
-                                    ? 'SPAM • ${livePreview.name}'
-                                    : '${livePreview.name} (${livePreview.simNetwork})',
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  color: livePreview.isSpam
-                                      ? Colors.red
-                                      : const Color(0xFF00B862),
-                                ),
-                              ),
-                      ),
-                      SizedBox(height: compactHeight ? 6 : 10),
-                      for (final row in _keys)
-                        Padding(
-                          padding: EdgeInsets.symmetric(vertical: rowPad),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            children: row.map((pair) {
-                              final digit = pair.$1;
-                              final letters = pair.$2;
-                              return InkWell(
-                                borderRadius: BorderRadius.circular(36),
-                                onTap: () => _appendDigit(digit),
-                                onLongPress: digit == '0'
-                                    ? () => _appendDigit('+')
-                                    : null,
-                                child: Container(
-                                  width: keyWidth,
-                                  height: keyHeight,
-                                  decoration: BoxDecoration(
-                                    color: Theme.of(context).cardTheme.color,
-                                    borderRadius: BorderRadius.circular(36),
-                                  ),
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Text(
-                                        digit,
-                                        style: TextStyle(
-                                          fontSize: keyWidth < 46
-                                              ? 16
-                                              : (compactHeight ? 21 : 24),
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                      if (letters.isNotEmpty && keyWidth >= 46)
-                                        Text(
-                                          letters,
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            letterSpacing: 1.2,
-                                            color: Theme.of(context)
-                                                .colorScheme
-                                                .onSurfaceVariant,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                        ),
-                      SizedBox(height: compactHeight ? 8 : 12),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          const SizedBox(width: 44),
-                          FloatingActionButton(
-                            backgroundColor: const Color(0xFF00B862),
-                            foregroundColor: Colors.white,
-                            elevation: 0,
-                            onPressed: dialedNumber.isEmpty
-                                ? null
-                                : () => widget.onCallPressed(dialedNumber),
-                            child: const Icon(Icons.call, size: 28),
-                          ),
-                          SizedBox(
-                            width: 44,
-                            child: IconButton(
-                              icon: const Icon(Icons.backspace_outlined),
-                              onPressed: dialedNumber.isEmpty ? null : _backspace,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-// ----------------------------------------------------------------------------
-// STEP 4B: RECENTS & SPAM FILTER TAB + INCOMING POPUP TEST
-// ----------------------------------------------------------------------------
-class RecentsTab extends StatefulWidget {
-  final AppState state;
-  final VoidCallback onSimulateIncoming;
-
-  const RecentsTab({
-    super.key,
-    required this.state,
-    required this.onSimulateIncoming,
-  });
-
-  @override
-  State<RecentsTab> createState() => _RecentsTabState();
-}
-
-class _RecentsTabState extends State<RecentsTab> {
-  String filter = 'all';
-
-  @override
-  Widget build(BuildContext context) {
-    final lang = widget.state.lang;
-    final logs = filter == 'all'
-        ? widget.state.callLogs
-        : widget.state.callLogs.where((e) => e.type == filter).toList();
-
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      child: Column(
+        children: [
+          const SizedBox(height: 24),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Column(
               children: [
                 Text(
-                  L10n.t(lang, 'recents'),
+                  dialed.isEmpty ? 'Sri Caller One' : dialed,
                   style: const TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w700,
+                    fontSize: 32,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.2,
                   ),
                 ),
-                OutlinedButton.icon(
-                  onPressed: widget.onSimulateIncoming,
-                  icon: const Icon(Icons.notifications_active_outlined, size: 18),
-                  label: Text(
-                    L10n.t(lang, 'simIncoming'),
-                    style: const TextStyle(fontSize: 12),
+                const SizedBox(height: 6),
+                if (match != null)
+                  Text(
+                    match.name == 'Unknown Caller'
+                        ? '${match.simNetwork} • Unknown'
+                        : '${match.name} • ${match.simNetwork}${match.isSpam ? " • SPAM" : ""}',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: match.isSpam ? Colors.red : const Color(0xFF00B862),
+                    ),
                   ),
+              ],
+            ),
+          ),
+          const Spacer(),
+          ...keys.map(
+            (row) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 28),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: row
+                    .map(
+                      (k) => SizedBox(
+                        width: 76,
+                        height: 64,
+                        child: TextButton(
+                          style: TextButton.styleFrom(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                          ),
+                          onPressed: () => _append(k),
+                          onLongPress: k == '0' ? () => _append('+') : null,
+                          child: Text(
+                            k,
+                            style: const TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                SizedBox(
+                  height: 54,
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF00B862),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                    ),
+                    onPressed: dialed.isEmpty
+                        ? null
+                        : () => widget.onCallNumber(dialed),
+                    icon: const Icon(Icons.call),
+                    label: const Text('Call'),
+                  ),
+                ),
+                IconButton(
+                  iconSize: 28,
+                  onPressed: _backspace,
+                  onLongPress: () => setState(() => dialed = ''),
+                  icon: const Icon(Icons.backspace_outlined),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _filterChip('all', L10n.t(lang, 'all')),
-                  const SizedBox(width: 8),
-                  _filterChip('incoming', L10n.t(lang, 'incoming')),
-                  const SizedBox(width: 8),
-                  _filterChip('outgoing', L10n.t(lang, 'outgoing')),
-                  const SizedBox(width: 8),
-                  _filterChip('spam', L10n.t(lang, 'spam')),
-                ],
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// TAB 2: RECENTS & SPAM FILTER
+// ============================================================================
+class _RecentsTab extends StatefulWidget {
+  final AppState state;
+  final void Function(String number) onTapNumber;
+
+  const _RecentsTab({required this.state, required this.onTapNumber});
+
+  @override
+  State<_RecentsTab> createState() => _RecentsTabState();
+}
+
+class _RecentsTabState extends State<_RecentsTab> {
+  String filter = 'all';
+  String query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final lang = widget.state.lang;
+    final items = widget.state.callLogs.where((c) {
+      final matchesFilter = filter == 'all' || c.type == filter;
+      final q = query.trim().toLowerCase();
+      final matchesQuery = q.isEmpty ||
+          c.name.toLowerCase().contains(q) ||
+          c.number.toLowerCase().contains(q);
+      return matchesFilter && matchesQuery;
+    }).toList();
+
+    return SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          Text(
+            L10n.t(lang, 'recents'),
+            style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            onChanged: (v) => setState(() => query = v),
+            decoration: InputDecoration(
+              hintText: L10n.t(lang, 'searchHint'),
+              prefixIcon: const Icon(Icons.search),
+              filled: true,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(18),
+                borderSide: BorderSide.none,
               ),
             ),
-            const SizedBox(height: 12),
-            Expanded(
-              child: ListView.separated(
-                itemCount: logs.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 8),
-                itemBuilder: (_, i) {
-                  final item = logs[i];
-                  final isSpam = item.type == 'spam';
-                  return Card(
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: isSpam
-                            ? Colors.red.withOpacity(0.14)
-                            : const Color(0xFF00B862).withOpacity(0.14),
-                        child: Icon(
-                          isSpam
-                              ? Icons.block
-                              : (item.type == 'outgoing'
-                                  ? Icons.call_made
-                                  : Icons.call_received),
-                          color: isSpam ? Colors.red : const Color(0xFF00B862),
-                        ),
-                      ),
-                      title: Text(
-                        item.name,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: isSpam ? Colors.red : null,
-                        ),
-                      ),
-                      subtitle: Text('${item.number} • ${item.simSlot}'),
-                      trailing: Text(
-                        item.time,
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ),
-                  );
-                },
+          ),
+          const SizedBox(height: 14),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _chip(L10n.t(lang, 'all'), 'all'),
+                const SizedBox(width: 8),
+                _chip(L10n.t(lang, 'incoming'), 'incoming'),
+                const SizedBox(width: 8),
+                _chip(L10n.t(lang, 'outgoing'), 'outgoing'),
+                const SizedBox(width: 8),
+                _chip(L10n.t(lang, 'spam'), 'spam'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          ...items.map(
+            (c) => Card(
+              margin: const EdgeInsets.only(bottom: 10),
+              child: ListTile(
+                onTap: () => widget.onTapNumber(c.number),
+                leading: CircleAvatar(
+                  backgroundColor: c.type == 'spam'
+                      ? Colors.red.withOpacity(0.15)
+                      : const Color(0xFF00B862).withOpacity(0.15),
+                  child: Icon(
+                    c.type == 'spam'
+                        ? Icons.block
+                        : (c.type == 'outgoing'
+                            ? Icons.call_made
+                            : Icons.call_received),
+                    color: c.type == 'spam' ? Colors.red : const Color(0xFF00B862),
+                  ),
+                ),
+                title: Text(
+                  c.name,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: c.type == 'spam' ? Colors.red : null,
+                  ),
+                ),
+                subtitle: Text('${c.number} • ${c.simSlot} • ${c.time}'),
+                trailing: IconButton(
+                  icon: const Icon(Icons.call_outlined),
+                  onPressed: () => widget.onTapNumber(c.number),
+                ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _filterChip(String key, String label) {
-    final active = filter == key;
+  Widget _chip(String label, String value) {
+    final active = filter == value;
     return ChoiceChip(
       label: Text(label),
       selected: active,
-      onSelected: (_) => setState(() => filter = key),
+      onSelected: (_) => setState(() => filter = value),
     );
   }
 }
 
-// ----------------------------------------------------------------------------
-// STEP 6: PRIVACY-FIRST UNKNOWN NUMBER LOOKUP TAB (SUPABASE)
-// ----------------------------------------------------------------------------
-class PrivacyLookupTab extends StatefulWidget {
+// ============================================================================
+// TAB 3: PRIVACY-FIRST NUMBER LOOKUP
+// ============================================================================
+class _PrivacyLookupTab extends StatefulWidget {
   final AppState state;
-  const PrivacyLookupTab({super.key, required this.state});
+  const _PrivacyLookupTab({required this.state});
 
   @override
-  State<PrivacyLookupTab> createState() => _PrivacyLookupTabState();
+  State<_PrivacyLookupTab> createState() => _PrivacyLookupTabState();
 }
 
-class _PrivacyLookupTabState extends State<PrivacyLookupTab> {
+class _PrivacyLookupTabState extends State<_PrivacyLookupTab> {
   final ctrl = TextEditingController();
   CallerEntry? result;
-  bool loading = false;
+  bool searching = false;
 
-  Future<void> _runLookup() async {
-    if (ctrl.text.trim().isEmpty) return;
-    setState(() => loading = true);
-    final found = await widget.state.lookupNumberRemote(ctrl.text);
-    if (!mounted) return;
-    setState(() {
-      result = found;
-      loading = false;
-    });
+  @override
+  void dispose() {
+    ctrl.dispose();
+    super.dispose();
   }
 
   @override
@@ -1428,10 +1413,9 @@ class _PrivacyLookupTabState extends State<PrivacyLookupTab> {
             L10n.t(lang, 'lookupSub'),
             style: TextStyle(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
-              height: 1.4,
             ),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 18),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(18),
@@ -1441,8 +1425,8 @@ class _PrivacyLookupTabState extends State<PrivacyLookupTab> {
                     controller: ctrl,
                     keyboardType: TextInputType.phone,
                     decoration: InputDecoration(
-                      hintText: '0771234567',
-                      prefixIcon: const Icon(Icons.phone_in_talk_outlined),
+                      labelText: L10n.t(lang, 'phoneNum'),
+                      prefixIcon: const Icon(Icons.search),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(16),
                       ),
@@ -1459,17 +1443,22 @@ class _PrivacyLookupTabState extends State<PrivacyLookupTab> {
                           borderRadius: BorderRadius.circular(16),
                         ),
                       ),
-                      onPressed: loading ? null : _runLookup,
-                      child: loading
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : Text(L10n.t(lang, 'searchBtn')),
+                      onPressed: searching
+                          ? null
+                          : () async {
+                              setState(() => searching = true);
+                              final found = await widget.state
+                                  .lookupNumberRemote(ctrl.text);
+                              if (mounted) {
+                                setState(() {
+                                  result = found;
+                                  searching = false;
+                                });
+                              }
+                            },
+                      child: Text(
+                        searching ? 'Searching...' : L10n.t(lang, 'searchBtn'),
+                      ),
                     ),
                   ),
                 ],
@@ -1480,7 +1469,6 @@ class _PrivacyLookupTabState extends State<PrivacyLookupTab> {
             const SizedBox(height: 18),
             Card(
               child: ListTile(
-                contentPadding: const EdgeInsets.all(16),
                 leading: CircleAvatar(
                   backgroundColor: result!.isSpam
                       ? Colors.red.withOpacity(0.15)
@@ -1492,13 +1480,20 @@ class _PrivacyLookupTabState extends State<PrivacyLookupTab> {
                 ),
                 title: Text(
                   result!.name,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                  ),
+                  style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
-                subtitle: Text(
-                  '${result!.number} • ${result!.simNetwork}${result!.isSpam ? " • SPAM" : ""}',
+                subtitle: Text('${result!.number} • ${result!.simNetwork}'),
+                trailing: IconButton(
+                  icon: const Icon(Icons.call),
+                  onPressed: () async {
+                    final err =
+                        await widget.state.placeRealPhoneCall(result!.number);
+                    if (err != null && mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(err)),
+                      );
+                    }
+                  },
                 ),
               ),
             ),
@@ -1509,54 +1504,14 @@ class _PrivacyLookupTabState extends State<PrivacyLookupTab> {
   }
 }
 
-// ----------------------------------------------------------------------------
-// STEP 7 & 8: SETTINGS + PIN-PROTECTED ADMIN DATABASE CONSOLE
-// ----------------------------------------------------------------------------
-class SettingsTab extends StatelessWidget {
+// ============================================================================
+// TAB 4: SETTINGS, LANGUAGE, THEME & ADMIN DATABASE
+// ============================================================================
+class _SettingsTab extends StatelessWidget {
   final AppState state;
-  const SettingsTab({super.key, required this.state});
+  final VoidCallback onTestIncoming;
 
-  void _openAdminPinDialog(BuildContext context) {
-    final pinCtrl = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Owner Admin PIN'),
-        content: TextField(
-          controller: pinCtrl,
-          keyboardType: TextInputType.number,
-          obscureText: true,
-          decoration: const InputDecoration(hintText: 'Enter PIN (2026)'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final valid = pinCtrl.text.trim() == '2026';
-              Navigator.pop(ctx);
-              if (valid) {
-                state.fetchCallersFromSupabase();
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => AdminDatabaseScreen(state: state),
-                  ),
-                );
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Invalid Admin PIN')),
-                );
-              }
-            },
-            child: const Text('Unlock'),
-          ),
-        ],
-      ),
-    );
-  }
+  const _SettingsTab({required this.state, required this.onTestIncoming});
 
   @override
   Widget build(BuildContext context) {
@@ -1567,44 +1522,31 @@ class SettingsTab extends StatelessWidget {
         children: [
           Text(
             L10n.t(lang, 'settings'),
-            style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
+            style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 16),
-          Card(
-            child: ListTile(
-              leading: const CircleAvatar(
-                backgroundColor: Color(0xFF00B862),
-                child: Icon(Icons.person, color: Colors.white),
-              ),
-              title: Text(
-                state.currentUserName.isEmpty
-                    ? 'Sri User'
-                    : state.currentUserName,
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              subtitle: Text(state.currentUserPhone),
-            ),
-          ),
-          const SizedBox(height: 14),
           Card(
             child: Column(
               children: [
                 SwitchListTile(
                   title: Text(L10n.t(lang, 'darkMode')),
-                  secondary: const Icon(Icons.dark_mode_outlined),
                   value: state.isDarkMode,
                   onChanged: state.toggleTheme,
                 ),
                 const Divider(height: 1),
                 ListTile(
-                  leading: const Icon(Icons.language),
                   title: Text(L10n.t(lang, 'language')),
+                  subtitle: Text(
+                    lang == AppLang.si
+                        ? 'සිංහල'
+                        : (lang == AppLang.ta ? 'தமிழ்' : 'English'),
+                  ),
                   trailing: DropdownButton<AppLang>(
-                    value: state.lang,
-                    underline: const SizedBox(),
+                    value: lang,
+                    underline: const SizedBox.shrink(),
                     items: const [
-                      DropdownMenuItem(value: AppLang.si, child: Text('සිංහල')),
                       DropdownMenuItem(value: AppLang.en, child: Text('English')),
+                      DropdownMenuItem(value: AppLang.si, child: Text('සිංහල')),
                       DropdownMenuItem(value: AppLang.ta, child: Text('தமிழ்')),
                     ],
                     onChanged: (v) {
@@ -1614,84 +1556,24 @@ class SettingsTab extends StatelessWidget {
                 ),
                 const Divider(height: 1),
                 ListTile(
-                  leading: const Icon(Icons.admin_panel_settings_outlined),
-                  title: Text(L10n.t(lang, 'adminPanel')),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => _openAdminPinDialog(context),
+                  leading: const Icon(Icons.notifications_active_outlined),
+                  title: Text(L10n.t(lang, 'simIncoming')),
+                  onTap: onTestIncoming,
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.logout, color: Colors.red),
+                  title: Text(
+                    L10n.t(lang, 'signOut'),
+                    style: const TextStyle(color: Colors.red),
+                  ),
+                  onTap: state.logout,
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 18),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.logout, color: Colors.red),
-              title: Text(
-                L10n.t(lang, 'signOut'),
-                style: const TextStyle(
-                  color: Colors.red,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              onTap: state.logout,
-            ),
-          ),
         ],
       ),
-    );
-  }
-}
-
-class AdminDatabaseScreen extends StatefulWidget {
-  final AppState state;
-  const AdminDatabaseScreen({super.key, required this.state});
-
-  @override
-  State<AdminDatabaseScreen> createState() => _AdminDatabaseScreenState();
-}
-
-class _AdminDatabaseScreenState extends State<AdminDatabaseScreen> {
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: widget.state,
-      builder: (context, _) {
-        final records = widget.state.adminRecords;
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Protected Caller Registry'),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                onPressed: widget.state.fetchCallersFromSupabase,
-              ),
-            ],
-          ),
-          body: widget.state.isSyncingDb
-              ? const Center(child: CircularProgressIndicator())
-              : ListView.separated(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: records.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemBuilder: (_, i) {
-                    final item = records[i];
-                    return Card(
-                      child: ListTile(
-                        title: Text(item.name),
-                        subtitle: Text(
-                          '${item.number} • ${item.simNetwork}${item.isSpam ? " • SPAM" : ""}',
-                        ),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline, color: Colors.red),
-                          onPressed: () =>
-                              widget.state.adminRemoveNumber(item.number),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-        );
-      },
     );
   }
 }
