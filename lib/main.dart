@@ -65,6 +65,7 @@ class L10n {
         'signOut': 'Sign Out / Log Out',
         'simIncoming': 'Test Incoming Call Popup',
         'callNow': 'Call Now',
+        'contactsPerm': 'Contacts Permission',
       },
       AppLang.si: {
         'appTitle': 'Sri Caller One',
@@ -103,6 +104,7 @@ class L10n {
         'signOut': 'ඉවත් වන්න (Log Out)',
         'simIncoming': 'Call Popup පරීක්ෂා කරන්න',
         'callNow': 'ඇමතුම ගන්න',
+        'contactsPerm': 'Contacts අවසරය',
       },
       AppLang.ta: {
         'appTitle': 'Sri Caller One',
@@ -141,6 +143,7 @@ class L10n {
         'signOut': 'வெளியேறு (Log Out)',
         'simIncoming': 'Call Popup சோதனை',
         'callNow': 'அழைக்கவும்',
+        'contactsPerm': 'Contacts அனுமதி',
       },
     };
     return data[lang]?[key] ?? data[AppLang.en]![key]!;
@@ -206,6 +209,7 @@ class AppState extends ChangeNotifier {
   bool isLoggedIn = false;
   bool isDarkMode = false;
   bool locationGranted = false;
+  bool contactsGranted = false;
   bool isSyncingDb = false;
   AppLang lang = AppLang.en;
 
@@ -278,6 +282,7 @@ class AppState extends ChangeNotifier {
     isLoggedIn = prefs.getBool('is_logged_in') ?? false;
     isDarkMode = prefs.getBool('is_dark_mode') ?? false;
     locationGranted = prefs.getBool('location_granted') ?? false;
+    contactsGranted = prefs.getBool('contacts_granted') ?? false;
     currentUserName = prefs.getString('current_user_name') ?? '';
     currentUserPhone = prefs.getString('current_user_phone') ?? '';
 
@@ -296,6 +301,7 @@ class AppState extends ChangeNotifier {
     await prefs.setBool('is_logged_in', isLoggedIn);
     await prefs.setBool('is_dark_mode', isDarkMode);
     await prefs.setBool('location_granted', locationGranted);
+    await prefs.setBool('contacts_granted', contactsGranted);
     await prefs.setString('current_user_name', currentUserName);
     await prefs.setString('current_user_phone', currentUserPhone);
     await prefs.setString('app_lang', lang.name);
@@ -397,6 +403,14 @@ class AppState extends ChangeNotifier {
     locationGranted = status.isGranted || status.isLimited || true;
     await _savePrefs();
     notifyListeners();
+  }
+
+  Future<bool> requestContactsPermission() async {
+    final status = await Permission.contacts.request();
+    contactsGranted = status.isGranted || status.isLimited;
+    await _savePrefs();
+    notifyListeners();
+    return contactsGranted;
   }
 
   void setLocationGranted(bool value) {
@@ -1049,7 +1063,8 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                     label: Text(L10n.t(widget.state.lang, 'callNow')),
                     onPressed: () async {
                       Navigator.pop(ctx);
-                      final err = await widget.state.placeRealPhoneCall(info.number);
+                      final err =
+                          await widget.state.placeRealPhoneCall(info.number);
                       if (err != null && mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(content: Text(err)),
@@ -1532,6 +1547,29 @@ class _SettingsTab extends StatelessWidget {
                   title: Text(L10n.t(lang, 'darkMode')),
                   value: state.isDarkMode,
                   onChanged: state.toggleTheme,
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.contacts_outlined),
+                  title: Text(L10n.t(lang, 'contactsPerm')),
+                  subtitle: Text(
+                    state.contactsGranted ? 'Allowed' : 'Tap to allow',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () async {
+                    final granted = await state.requestContactsPermission();
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            granted
+                                ? 'Contacts permission allowed'
+                                : 'Contacts permission not granted',
+                          ),
+                        ),
+                      );
+                    }
+                  },
                 ),
                 const Divider(height: 1),
                 ListTile(
